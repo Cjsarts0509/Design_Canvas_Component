@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react-swc';
 import path from 'path';
 
 export default defineConfig({
-  base: '/DesignCanvasComponent/', // 1. 저장소 이름 설정 (필수!)
+  base: '/Design_Canvas_Component/', // 1. 저장소 이름 설정 (필수!)
   plugins: [react()],
   resolve: {
     extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
