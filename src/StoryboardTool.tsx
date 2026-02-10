@@ -1,4 +1,4 @@
-// 📌 주석(Annotation) 데이터 타입
+// 📌 주석(Annotation) 데이터 타입 (이미지 위 마커용)
 export interface Annotation {
   id: string;
   number: number;
@@ -20,16 +20,24 @@ export interface Annotation {
 // 📌 슬라이드(Slide) 데이터 타입
 export interface Slide {
   id: string;
+  type: 'IMAGE' | 'NOTE'; // 📌 [신규] 슬라이드 종류 구분
+  
+  // 공통 필드
   name: string;       // [관리용] 좌측 패널 이름 (예: 슬라이드 1)
-  taskName: string;   // 📌 [신규] 화면별 업무명 (예: 통합회계 시스템 구축) - 사용자 입력
-  screenName: string; // 📌 [기존] 화면별 화면명 (예: 로그인 화면) - 사용자 입력
-  annotations: Annotation[];
-  imageUrl: string | null;
+  
+  // IMAGE 타입용 필드
+  taskName?: string;   // 화면별 업무명
+  screenName?: string; // 화면명
+  imageUrl?: string | null;
+  annotations?: Annotation[];
+
+  // NOTE 타입용 필드 (목차 및 간지용)
+  title?: string;      // 챕터/주석 제목
+  description?: string;// 상세 설명
 }
 
 // 📌 문서 정보(DocumentInfo) 데이터 타입
-// 'title'은 이제 Slide별로 관리되므로 제거했습니다.
 export interface DocumentInfo {
-  author: string; // 작성자 (공통)
-  date: string;   // 날짜 (공통)
+  author: string; 
+  date: string;  
 }
