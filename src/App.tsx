@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Annotation, Slide, DocumentInfo } from './StoryboardTool';
 import { DesignCanvas } from './components/DesignCanvas';
 import SlidePanel from './components/SlidePanel'; 
 import { AnnotationPanel } from './components/AnnotationPanel';
-import { exportToPowerPoint } from './utils/exportToPPT';
-import { Download } from 'lucide-react';
+import { exportToPowerPoint } from './utils/exportToPPT'; // 수정된 함수
+import { Download, Upload } from 'lucide-react';
+import JSZip from 'jszip'; // 압축 라이브러리 추가
 
 interface HistoryState {
   slides: Slide[];
@@ -33,6 +34,8 @@ export default function App() {
   const [history, setHistory] = useState<HistoryState[]>([{ slides: slides }]);
   const [historyIndex, setHistoryIndex] = useState(0);
   const [isUpdatingFromHistory, setIsUpdatingFromHistory] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentSlide = slides.find((s) => s.id === currentSlideId) || slides[0];
 
@@ -149,7 +152,6 @@ export default function App() {
     setSlides(slides.map((s) => s.id === currentSlideId ? { ...s, annotations: s.annotations.filter((ann) => ann.id !== id) } : s));
   };
 
-  // History Logic
   useEffect(() => {
     if (isUpdatingFromHistory) { setIsUpdatingFromHistory(false); return; }
     const newHistoryState: HistoryState = { slides: JSON.parse(JSON.stringify(slides)) };
@@ -180,7 +182,6 @@ export default function App() {
     }
   };
 
-  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable) return;
@@ -191,8 +192,61 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [historyIndex, history, currentSlideId, slides]);
 
-  const handleExportToPPT = async () => {
-    try { await exportToPowerPoint(slides, documentInfo); } catch (error) { console.error('Error exporting to PowerPoint:', error); alert('PPT 내보내기 실패'); }
+  // 📌 [수정됨] 압축 저장 기능 (Zip Download)
+  const handleExportToZip = async () => {
+    try {
+      const zip = new JSZip();
+      const dateStr = new Date().toISOString().split('T')[0];
+      const fileName = `manual_${dateStr}`;
+
+      // 1. PPT 데이터 생성 (이제 Blob을 반환받음)
+      // 주의: exportToPowerPoint가 Blob을 반환하도록 수정되어야 합니다.
+      const pptBlob = await exportToPowerPoint(slides, documentInfo);
+      zip.file(`${fileName}.pptx`, pptBlob);
+
+      // 2. JSON 데이터 생성
+      const jsonStr = JSON.stringify(slides, null, 2);
+      zip.file(`${fileName}_backup.json`, jsonStr);
+
+      // 3. 압축 및 다운로드
+      const zipContent = await zip.generateAsync({ type: 'blob' });
+      
+      const downloadLink = document.createElement('a');
+      downloadLink.href = URL.createObjectURL(zipContent);
+      downloadLink.download = `${fileName}.zip`;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      document.body.removeChild(downloadLink);
+      URL.revokeObjectURL(downloadLink.href);
+
+    } catch (error) { 
+      console.error('Export Error:', error); 
+      alert('파일 내보내기 중 오류가 발생했습니다. exportToPPT.ts가 올바르게 수정되었는지 확인해주세요.'); 
+    }
+  };
+
+  const handleLoadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const loadedSlides = JSON.parse(event.target?.result as string);
+        if (Array.isArray(loadedSlides) && loadedSlides.length > 0 && loadedSlides[0].id) {
+          setSlides(loadedSlides);
+          setCurrentSlideId(loadedSlides[0].id);
+          alert('프로젝트를 성공적으로 불러왔습니다.');
+        } else {
+          alert('올바르지 않은 프로젝트 파일입니다.');
+        }
+      } catch (error) {
+        console.error('JSON Parse Error:', error);
+        alert('파일을 읽는 중 오류가 발생했습니다.');
+      }
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
   };
 
   return (
@@ -203,13 +257,32 @@ export default function App() {
             <h1 className="text-gray-900 font-bold text-lg">매뉴얼 생성 도구</h1>
             <p className="text-sm text-gray-600">스크린샷과 주석으로 매뉴얼 만들기</p>
           </div>
-          <button
-            onClick={handleExportToPPT}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2 transition-colors shadow-sm font-medium"
-          >
-            <Download className="size-4" />
-            PPT로 내보내기
-          </button>
+          
+          <div className="flex gap-2">
+            <input 
+              type="file" 
+              accept=".json" 
+              ref={fileInputRef} 
+              className="hidden" 
+              onChange={handleLoadProject}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded flex items-center gap-2 transition-colors shadow-sm font-medium border border-gray-300"
+            >
+              <Upload className="size-4" />
+              불러오기 (.json)
+            </button>
+
+            {/* 📌 [수정됨] Zip 저장 버튼 */}
+            <button
+              onClick={handleExportToZip}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2 transition-colors shadow-sm font-medium"
+            >
+              <Download className="size-4" />
+              저장하기 (.zip)
+            </button>
+          </div>
         </div>
       </header>
 
@@ -233,7 +306,6 @@ export default function App() {
           <div className="bg-white border-b border-gray-300 p-4 shrink-0 z-10 shadow-sm flex items-end justify-between">
             <div className="flex gap-4 w-full max-w-5xl">
               
-              {/* 📌 [수정됨] "업무 (문서 제목)" -> "업무" */}
               <div className="flex-1">
                 <label className="block text-xs text-blue-600 mb-1 font-bold">업무</label>
                 <input
@@ -245,7 +317,6 @@ export default function App() {
                 />
               </div>
               
-              {/* 화면명 */}
               <div className="flex-1">
                 <label className="block text-xs text-blue-600 mb-1 font-bold">화면명 (현재 슬라이드)</label>
                 <input
@@ -257,7 +328,6 @@ export default function App() {
                 />
               </div>
 
-              {/* 작성자 */}
               <div className="w-32">
                 <label className="block text-xs text-gray-500 mb-1 font-bold">작성자</label>
                 <input
@@ -268,7 +338,6 @@ export default function App() {
                 />
               </div>
 
-              {/* 줌 */}
                <div className="w-24 text-right flex flex-col justify-end pb-1">
                 <span className="text-xs text-gray-400 font-mono block">Zoom</span>
                 <span className="text-lg font-bold text-gray-700">{Math.round(scale * 100)}%</span>

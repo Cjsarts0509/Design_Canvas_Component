@@ -42,7 +42,8 @@ const stripHtml = (html: string) => {
    return text.trim();
 };
 
-export const exportToPowerPoint = async (slides: Slide[], docInfo: DocumentInfo) => {
+// 📌 [수정됨] 반환 타입이 Promise<void>에서 Promise<Blob>으로 변경되었습니다.
+export const exportToPowerPoint = async (slides: Slide[], docInfo: DocumentInfo): Promise<Blob> => {
   const pptx = new pptxgen();
 
   const PPT_WIDTH = 10;
@@ -124,7 +125,7 @@ export const exportToPowerPoint = async (slides: Slide[], docInfo: DocumentInfo)
     });
 
     // 테이블 헤더
-    const tableRows = [
+    const tableRows: pptxgen.TableRow[] = [
       [
         { 
           text: "No", 
@@ -221,13 +222,14 @@ export const exportToPowerPoint = async (slides: Slide[], docInfo: DocumentInfo)
     // [D] 이미지 위 마커 찍기 (60% 축소 적용)
     // =======================================================
     slideData.annotations.forEach((ann) => {
-      // 📌 [수정됨] 마커 크기 축소 (0.25 -> 0.15) 약 60%
+      // 마커 크기 축소 (0.25 -> 0.15) 약 60%
       const markerSizeInch = 0.15;
       
       const ratioX = ann.x / VIRTUAL_WIDTH;
       const ratioY = ann.y / VIRTUAL_HEIGHT;
-      const pptX = renderX + (ratioX * renderW) - (markerSizeInch / 2);
-      const pptY = renderY + (ratioY * renderH) - (markerSizeInch / 2);
+      // 이미지 렌더링 영역 기준 상대 좌표 계산
+      const pptX = renderX + (ratioX * renderW) - (markerSizeInch / 2); // 📌 마커 중심 보정
+      const pptY = renderY + (ratioY * renderH) - (markerSizeInch / 2); // 📌 마커 중심 보정
 
       if (slideData.imageUrl) {
         // 마커 원
@@ -241,13 +243,16 @@ export const exportToPowerPoint = async (slides: Slide[], docInfo: DocumentInfo)
         slide.addText(ann.number.toString(), { 
           x: pptX, y: pptY, w: markerSizeInch, h: markerSizeInch, 
           align: 'center', valign: 'middle', 
-          fontSize: 7, // 📌 폰트 사이즈 축소
+          fontSize: 7, 
           bold: true, color: COLORS.WHITE 
         });
       }
     });
   }
 
-  const fileName = `${slides[0]?.taskName.replace(/\s+/g, '_') || 'Manual'}.pptx`;
-  await pptx.writeFile({ fileName });
+  // 📌 [수정됨] 파일 저장이 아니라 Blob 데이터를 반환하도록 변경
+  // const fileName = `${slides[0]?.taskName.replace(/\s+/g, '_') || 'Manual'}.pptx`;
+  // await pptx.writeFile({ fileName });
+  
+  return await pptx.write("blob") as Promise<Blob>;
 };
