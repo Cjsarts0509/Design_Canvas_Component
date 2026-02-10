@@ -1,20 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Annotation, Slide, DocumentInfo } from './StoryboardTool';
 import { DesignCanvas } from './components/DesignCanvas';
 import SlidePanel from './components/SlidePanel'; 
 import { AnnotationPanel } from './components/AnnotationPanel';
-import { exportToPowerPoint } from './utils/exportToPPT'; // 수정된 함수
-import { Download, Upload } from 'lucide-react';
-import JSZip from 'jszip'; // 압축 라이브러리 추가
+import { exportToPowerPoint } from './utils/exportToPPT'; 
+import { Download, Upload, StickyNote } from 'lucide-react';
+import JSZip from 'jszip'; 
 
-interface HistoryState {
-  slides: Slide[];
-}
+type HistoryAction = 
+  | { type: 'ADD'; slide: Slide; index: number }
+  | { type: 'DELETE'; slide: Slide; index: number }
+  | { type: 'UPDATE'; slideId: string; prev: Slide; next: Slide };
 
 export default function App() {
   const [slides, setSlides] = useState<Slide[]>([
     {
       id: `slide-${Date.now()}`,
+      type: 'IMAGE', 
       name: '슬라이드 1',
       taskName: '통합회계 시스템 구축', 
       screenName: '', 
@@ -30,47 +32,69 @@ export default function App() {
   });
   
   const [scale, setScale] = useState(0.65); 
-
-  const [history, setHistory] = useState<HistoryState[]>([{ slides: slides }]);
-  const [historyIndex, setHistoryIndex] = useState(0);
-  const [isUpdatingFromHistory, setIsUpdatingFromHistory] = useState(false);
-
+  const [undoStack, setUndoStack] = useState<HistoryAction[]>([]);
+  const [redoStack, setRedoStack] = useState<HistoryAction[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentSlide = slides.find((s) => s.id === currentSlideId) || slides[0];
 
-  const handleAddSlide = () => {
+  const pushToHistory = (action: HistoryAction) => {
+    setUndoStack((prev) => [...prev, action]);
+    setRedoStack([]); 
+  };
+
+  const handleAddSlide = (type: 'IMAGE' | 'NOTE') => {
     const newSlide: Slide = {
       id: `slide-${Date.now()}`,
-      name: `슬라이드 ${slides.length + 1}`,
-      taskName: '통합회계 시스템 구축',
+      type: type, 
+      name: type === 'NOTE' ? `주석 ${slides.length + 1}` : `슬라이드 ${slides.length + 1}`,
+      taskName: type === 'IMAGE' ? '통합회계 시스템 구축' : undefined,
       screenName: '',
+      title: type === 'NOTE' ? '새로운 챕터/주석' : undefined, 
+      description: type === 'NOTE' ? '' : undefined,
       annotations: [],
       imageUrl: null,
     };
-    setSlides([...slides, newSlide]);
+    
+    setSlides((prev) => [...prev, newSlide]);
     setCurrentSlideId(newSlide.id);
+    pushToHistory({ type: 'ADD', slide: newSlide, index: slides.length });
   };
 
   const handleDeleteSlide = (id: string) => {
     if (slides.length === 1) return;
+    const index = slides.findIndex((s) => s.id === id);
+    if (index === -1) return;
+    const targetSlide = slides[index];
     const newSlides = slides.filter((s) => s.id !== id);
     setSlides(newSlides);
-    if (currentSlideId === id) {
-      setCurrentSlideId(newSlides[0].id);
-    }
+    if (currentSlideId === id) setCurrentSlideId(newSlides[Math.max(0, index - 1)].id);
+    pushToHistory({ type: 'DELETE', slide: targetSlide, index });
+  };
+
+  const updateSlideWithHistory = (newSlide: Slide) => {
+    const prevSlide = slides.find(s => s.id === newSlide.id);
+    if (!prevSlide) return;
+    setSlides((prev) => prev.map((s) => (s.id === newSlide.id ? newSlide : s)));
+    pushToHistory({ type: 'UPDATE', slideId: newSlide.id, prev: prevSlide, next: newSlide });
   };
 
   const handleUpdateSlideName = (id: string, name: string) => {
-    setSlides(slides.map((s) => (s.id === id ? { ...s, name } : s)));
+    const slide = slides.find(s => s.id === id);
+    if (slide) updateSlideWithHistory({ ...slide, name });
   };
-
   const handleUpdateTaskName = (taskName: string) => {
-    setSlides(slides.map((s) => (s.id === currentSlideId ? { ...s, taskName } : s)));
+    if (currentSlide) updateSlideWithHistory({ ...currentSlide, taskName });
   };
-
   const handleUpdateScreenName = (screenName: string) => {
-    setSlides(slides.map((s) => (s.id === currentSlideId ? { ...s, screenName } : s)));
+    if (currentSlide) updateSlideWithHistory({ ...currentSlide, screenName });
+  };
+  
+  const handleUpdateNoteTitle = (title: string) => {
+     if (currentSlide && currentSlide.type === 'NOTE') updateSlideWithHistory({ ...currentSlide, title, name: title });
+  };
+  const handleUpdateNoteDescription = (description: string) => {
+     if (currentSlide && currentSlide.type === 'NOTE') updateSlideWithHistory({ ...currentSlide, description });
   };
 
   const handleImageUpload = (slideId: string, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -79,18 +103,22 @@ export default function App() {
       const reader = new FileReader();
       reader.onload = (event) => {
         const imageUrl = event.target?.result as string;
-        setSlides(slides.map((s) => (s.id === slideId ? { ...s, imageUrl } : s)));
+        const targetSlide = slides.find(s => s.id === slideId);
+        if (targetSlide && targetSlide.type === 'IMAGE') updateSlideWithHistory({ ...targetSlide, imageUrl });
       };
       reader.readAsDataURL(file);
     }
   };
 
-  // Ctrl+V 붙여넣기
+  // 📌 [복원됨] 스크린샷 붙여넣기 기능 (Ctrl+V)
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
+      // 입력 필드에서는 붙여넣기 동작 허용 (이미지 붙여넣기 방지)
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable) return;
+      
       const items = e.clipboardData?.items;
       if (!items) return;
+
       for (const item of items) {
         if (item.type.indexOf('image') !== -1) {
           e.preventDefault(); 
@@ -99,7 +127,10 @@ export default function App() {
             const reader = new FileReader();
             reader.onload = (event) => {
               const imageUrl = event.target?.result as string;
-              setSlides(prev => prev.map((s) => (s.id === currentSlideId ? { ...s, imageUrl } : s)));
+              // 📌 현재 슬라이드가 존재하고, IMAGE 타입일 때만 업데이트
+              if (currentSlide && currentSlide.type === 'IMAGE') {
+                  updateSlideWithHistory({ ...currentSlide, imageUrl });
+              }
             };
             reader.readAsDataURL(blob);
           }
@@ -109,108 +140,95 @@ export default function App() {
     };
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [currentSlideId]);
+  }, [currentSlideId, slides]); // 의존성 배열 유지
 
   const handleRemoveImage = (slideId: string) => {
-    setSlides(slides.map((s) => (s.id === slideId ? { ...s, imageUrl: null } : s)));
+    const targetSlide = slides.find(s => s.id === slideId);
+    if (targetSlide && targetSlide.type === 'IMAGE') updateSlideWithHistory({ ...targetSlide, imageUrl: null });
   };
 
   const handleAddAnnotation = () => {
-    const newAnnotation: Annotation = {
-      id: `annotation-${Date.now()}`,
-      number: currentSlide.annotations.length + 1,
-      x: 640,
-      y: 360,
-      color: '#ef4444',
-      note: '',
-      style: {
-        fontSize: '9pt',
-        textAlign: 'left',
-        backgroundColor: 'transparent',
-        textColor: '#000000',
-        bold: false,
-        italic: false,
-        underline: false,
-      },
-    };
-    setSlides(
-      slides.map((s) =>
-        s.id === currentSlideId ? { ...s, annotations: [...s.annotations, newAnnotation] } : s
-      )
-    );
+    if (currentSlide && currentSlide.type === 'IMAGE') {
+       const newAnnotation: Annotation = {
+          id: `annotation-${Date.now()}`,
+          number: (currentSlide.annotations?.length || 0) + 1,
+          x: 640, y: 360, color: '#ef4444', note: '',
+          style: { fontSize: '9pt', textAlign: 'left', backgroundColor: 'transparent', textColor: '#000000', bold: false, italic: false, underline: false },
+       };
+       updateSlideWithHistory({ ...currentSlide, annotations: [...(currentSlide.annotations || []), newAnnotation] });
+    }
   };
 
   const handleUpdateAnnotation = (id: string, updates: Partial<Annotation>) => {
-    setSlides(slides.map((s) => s.id === currentSlideId ? { ...s, annotations: s.annotations.map((ann) => ann.id === id ? { ...ann, ...updates } : ann) } : s));
+    if (currentSlide && currentSlide.type === 'IMAGE' && currentSlide.annotations) {
+        const newAnnotations = currentSlide.annotations.map((ann) => ann.id === id ? { ...ann, ...updates } : ann);
+        updateSlideWithHistory({ ...currentSlide, annotations: newAnnotations });
+    }
   };
-
   const handleUpdateAnnotationPosition = (id: string, x: number, y: number) => {
-    setSlides(slides.map((s) => s.id === currentSlideId ? { ...s, annotations: s.annotations.map((ann) => ann.id === id ? { ...ann, x, y } : ann) } : s));
+    if (currentSlide && currentSlide.type === 'IMAGE' && currentSlide.annotations) {
+        const newAnnotations = currentSlide.annotations.map((ann) => ann.id === id ? { ...ann, x, y } : ann);
+        updateSlideWithHistory({ ...currentSlide, annotations: newAnnotations });
+    }
   };
-
   const handleDeleteAnnotation = (id: string) => {
-    setSlides(slides.map((s) => s.id === currentSlideId ? { ...s, annotations: s.annotations.filter((ann) => ann.id !== id) } : s));
-  };
-
-  useEffect(() => {
-    if (isUpdatingFromHistory) { setIsUpdatingFromHistory(false); return; }
-    const newHistoryState: HistoryState = { slides: JSON.parse(JSON.stringify(slides)) };
-    const currentState = history[historyIndex];
-    if (JSON.stringify(currentState.slides) === JSON.stringify(newHistoryState.slides)) return;
-    const newHistory = history.slice(0, historyIndex + 1);
-    newHistory.push(newHistoryState);
-    if (newHistory.length > 20) { newHistory.shift(); setHistory(newHistory); setHistoryIndex(newHistory.length - 1); } else { setHistory(newHistory); setHistoryIndex(newHistory.length - 1); }
-  }, [slides]);
-
-  const handleUndo = () => {
-    if (historyIndex > 0) {
-      const newIndex = historyIndex - 1;
-      const previousState = history[newIndex];
-      setIsUpdatingFromHistory(true);
-      setSlides(JSON.parse(JSON.stringify(previousState.slides)));
-      setHistoryIndex(newIndex);
+    if (currentSlide && currentSlide.type === 'IMAGE' && currentSlide.annotations) {
+        const newAnnotations = currentSlide.annotations.filter((ann) => ann.id !== id);
+        updateSlideWithHistory({ ...currentSlide, annotations: newAnnotations });
     }
   };
 
-  const handleRedo = () => {
-    if (historyIndex < history.length - 1) {
-      const newIndex = historyIndex + 1;
-      const nextState = history[newIndex];
-      setIsUpdatingFromHistory(true);
-      setSlides(JSON.parse(JSON.stringify(nextState.slides)));
-      setHistoryIndex(newIndex);
-    }
-  };
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) return;
+    const action = undoStack[undoStack.length - 1];
+    const newUndoStack = undoStack.slice(0, -1);
+    setSlides((prevSlides) => {
+        let updatedSlides = [...prevSlides];
+        switch (action.type) {
+            case 'ADD': return prevSlides.filter(s => s.id !== action.slide.id);
+            case 'DELETE': updatedSlides.splice(action.index, 0, action.slide); return updatedSlides;
+            case 'UPDATE': return prevSlides.map(s => s.id === action.slideId ? action.prev : s);
+            default: return prevSlides;
+        }
+    });
+    if (action.type === 'DELETE') setCurrentSlideId(action.slide.id);
+    if (action.type === 'UPDATE') setCurrentSlideId(action.slideId);
+    setUndoStack(newUndoStack);
+    setRedoStack(prev => [...prev, action]);
+  }, [undoStack]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable) return;
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo(); }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z') { e.preventDefault(); handleRedo(); }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [historyIndex, history, currentSlideId, slides]);
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) return;
+    const action = redoStack[redoStack.length - 1];
+    const newRedoStack = redoStack.slice(0, -1);
+    setSlides((prevSlides) => {
+        let updatedSlides = [...prevSlides];
+        switch (action.type) {
+            case 'ADD': updatedSlides.splice(action.index, 0, action.slide); return updatedSlides;
+            case 'DELETE': return prevSlides.filter(s => s.id !== action.slide.id);
+            case 'UPDATE': return prevSlides.map(s => s.id === action.slideId ? action.next : s);
+            default: return prevSlides;
+        }
+    });
+    if (action.type === 'ADD') setCurrentSlideId(action.slide.id);
+    if (action.type === 'UPDATE') setCurrentSlideId(action.slideId);
+    setRedoStack(newRedoStack);
+    setUndoStack(prev => [...prev, action]);
+  }, [redoStack]);
 
-  // 📌 [수정됨] 압축 저장 기능 (Zip Download)
   const handleExportToZip = async () => {
     try {
       const zip = new JSZip();
       const dateStr = new Date().toISOString().split('T')[0];
       const fileName = `manual_${dateStr}`;
-
-      // 1. PPT 데이터 생성 (이제 Blob을 반환받음)
-      // 주의: exportToPowerPoint가 Blob을 반환하도록 수정되어야 합니다.
       const pptBlob = await exportToPowerPoint(slides, documentInfo);
-      zip.file(`${fileName}.pptx`, pptBlob);
-
-      // 2. JSON 데이터 생성
-      const jsonStr = JSON.stringify(slides, null, 2);
-      zip.file(`${fileName}_backup.json`, jsonStr);
-
-      // 3. 압축 및 다운로드
-      const zipContent = await zip.generateAsync({ type: 'blob' });
       
+      const safeBlob = pptBlob instanceof Blob ? pptBlob : new Blob([pptBlob]);
+      
+      zip.file(`${fileName}.pptx`, safeBlob);
+      zip.file(`${fileName}_backup.json`, JSON.stringify(slides, null, 2));
+
+      const zipContent = await zip.generateAsync({ type: 'blob' });
       const downloadLink = document.createElement('a');
       downloadLink.href = URL.createObjectURL(zipContent);
       downloadLink.download = `${fileName}.zip`;
@@ -218,80 +236,54 @@ export default function App() {
       downloadLink.click();
       document.body.removeChild(downloadLink);
       URL.revokeObjectURL(downloadLink.href);
-
     } catch (error) { 
       console.error('Export Error:', error); 
-      alert('파일 내보내기 중 오류가 발생했습니다. exportToPPT.ts가 올바르게 수정되었는지 확인해주세요.'); 
+      alert('파일 생성 중 오류가 발생했습니다.'); 
     }
   };
-
+  
   const handleLoadProject = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const loadedSlides = JSON.parse(event.target?.result as string);
-        if (Array.isArray(loadedSlides) && loadedSlides.length > 0 && loadedSlides[0].id) {
-          setSlides(loadedSlides);
-          setCurrentSlideId(loadedSlides[0].id);
-          alert('프로젝트를 성공적으로 불러왔습니다.');
-        } else {
-          alert('올바르지 않은 프로젝트 파일입니다.');
-        }
-      } catch (error) {
-        console.error('JSON Parse Error:', error);
-        alert('파일을 읽는 중 오류가 발생했습니다.');
-      }
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    };
-    reader.readAsText(file);
+     const file = e.target.files?.[0];
+     if (!file) return;
+     const reader = new FileReader();
+     reader.onload = (event) => {
+       try {
+         const loadedSlides = JSON.parse(event.target?.result as string);
+         if (Array.isArray(loadedSlides) && loadedSlides.length > 0) {
+           setSlides(loadedSlides);
+           setCurrentSlideId(loadedSlides[0].id);
+           setUndoStack([]); setRedoStack([]);
+           alert('프로젝트 로드 완료');
+         }
+       } catch (e) { alert('파일 로드 실패'); }
+       if (fileInputRef.current) fileInputRef.current.value = '';
+     };
+     reader.readAsText(file);
   };
 
   return (
     <div className="h-screen flex flex-col bg-gray-100 overflow-hidden">
-      <header className="bg-white border-b border-gray-300 px-6 py-4 shrink-0 z-20 relative">
-        <div className="flex items-center justify-between">
-          <div>
+      <header className="bg-white border-b border-gray-300 px-6 py-4 shrink-0 z-20 relative flex justify-between items-center">
+         <div>
             <h1 className="text-gray-900 font-bold text-lg">매뉴얼 생성 도구</h1>
             <p className="text-sm text-gray-600">스크린샷과 주석으로 매뉴얼 만들기</p>
           </div>
-          
           <div className="flex gap-2">
-            <input 
-              type="file" 
-              accept=".json" 
-              ref={fileInputRef} 
-              className="hidden" 
-              onChange={handleLoadProject}
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded flex items-center gap-2 transition-colors shadow-sm font-medium border border-gray-300"
-            >
-              <Upload className="size-4" />
-              불러오기 (.json)
+            <input type="file" accept=".json" ref={fileInputRef} className="hidden" onChange={handleLoadProject} />
+            <button onClick={() => fileInputRef.current?.click()} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded flex items-center gap-2 border border-gray-300 shadow-sm font-medium">
+              <Upload className="size-4" /> 불러오기
             </button>
-
-            {/* 📌 [수정됨] Zip 저장 버튼 */}
-            <button
-              onClick={handleExportToZip}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2 transition-colors shadow-sm font-medium"
-            >
-              <Download className="size-4" />
-              저장하기 (.zip)
+            <button onClick={handleExportToZip} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2 shadow-sm font-medium">
+              <Download className="size-4" /> 저장하기 (.zip)
             </button>
           </div>
-        </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel */}
         <SlidePanel
           slides={slides}
           currentSlideId={currentSlideId}
-          onAddSlide={handleAddSlide}
+          onAddSlide={handleAddSlide} 
           onSelectSlide={setCurrentSlideId}
           onDeleteSlide={handleDeleteSlide}
           onUpdateSlideName={handleUpdateSlideName}
@@ -299,76 +291,93 @@ export default function App() {
           onRemoveImage={handleRemoveImage}
         />
 
-        {/* Center Canvas */}
         <div className="flex-1 flex flex-col overflow-hidden relative bg-gray-100">
           
-          {/* 상단 정보바 */}
-          <div className="bg-white border-b border-gray-300 p-4 shrink-0 z-10 shadow-sm flex items-end justify-between">
-            <div className="flex gap-4 w-full max-w-5xl">
-              
-              <div className="flex-1">
-                <label className="block text-xs text-blue-600 mb-1 font-bold">업무</label>
-                <input
-                  type="text"
-                  value={currentSlide.taskName || ''}
-                  onChange={(e) => handleUpdateTaskName(e.target.value)}
-                  className="w-full px-3 py-1.5 border border-blue-300 bg-blue-50/10 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="예: 통합회계 시스템 구축"
-                />
+          {currentSlide.type === 'IMAGE' ? (
+            <>
+              <div className="bg-white border-b border-gray-300 p-4 shrink-0 z-10 shadow-sm flex items-end justify-between gap-4">
+                 <div className="flex-1">
+                    <label className="block text-xs text-blue-600 mb-1 font-bold">업무</label>
+                    <input type="text" value={currentSlide.taskName || ''} onChange={(e) => handleUpdateTaskName(e.target.value)} className="w-full px-3 py-1.5 border border-blue-300 bg-blue-50/10 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                 </div>
+                 <div className="flex-1">
+                    <label className="block text-xs text-blue-600 mb-1 font-bold">화면명</label>
+                    <input type="text" value={currentSlide.screenName || ''} onChange={(e) => handleUpdateScreenName(e.target.value)} className="w-full px-3 py-1.5 border border-blue-300 bg-blue-50/30 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500" />
+                 </div>
+                 <div className="w-32">
+                    <label className="block text-xs text-gray-500 mb-1 font-bold">작성자</label>
+                    <input type="text" value={documentInfo.author} onChange={(e) => setDocumentInfo({ ...documentInfo, author: e.target.value })} className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm outline-none" />
+                 </div>
+                 <div className="w-24 text-right">
+                    <span className="text-xs text-gray-400 font-mono block">Zoom</span>
+                    <span className="text-lg font-bold text-gray-700">{Math.round(scale * 100)}%</span>
+                 </div>
               </div>
               
-              <div className="flex-1">
-                <label className="block text-xs text-blue-600 mb-1 font-bold">화면명 (현재 슬라이드)</label>
-                <input
-                  type="text"
-                  value={currentSlide.screenName || ''}
-                  onChange={(e) => handleUpdateScreenName(e.target.value)}
-                  className="w-full px-3 py-1.5 border border-blue-300 bg-blue-50/30 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="화면명을 입력하세요"
+              <div className="flex-1 overflow-hidden relative bg-gray-200 w-full h-full">
+                <DesignCanvas
+                  designElements={[]}
+                  selectedElementId={null}
+                  onSelectElement={() => {}}
+                  onUpdateElement={() => {}}
+                  annotations={currentSlide.annotations || []}
+                  onUpdateAnnotationPosition={handleUpdateAnnotationPosition}
+                  imageUrl={currentSlide.imageUrl || null}
+                  scale={scale}
+                  setScale={setScale}
                 />
               </div>
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center p-10 bg-gray-50">
+               <div className="w-full max-w-2xl bg-white p-8 rounded-xl shadow-lg border border-orange-200">
+                  <div className="flex items-center gap-3 mb-6 border-b pb-4 border-gray-100">
+                     <div className="p-3 bg-orange-100 rounded-full text-orange-600">
+                        <StickyNote className="size-8" />
+                     </div>
+                     <div>
+                        <h2 className="text-2xl font-bold text-gray-800">주석(챕터) 슬라이드 편집</h2>
+                        <p className="text-sm text-gray-500">이 내용은 PPT 생성 시 간지(챕터) 페이지로 삽입됩니다.</p>
+                     </div>
+                  </div>
 
-              <div className="w-32">
-                <label className="block text-xs text-gray-500 mb-1 font-bold">작성자</label>
-                <input
-                  type="text"
-                  value={documentInfo.author}
-                  onChange={(e) => setDocumentInfo({ ...documentInfo, author: e.target.value })}
-                  className="w-full px-3 py-1.5 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                />
-              </div>
-
-               <div className="w-24 text-right flex flex-col justify-end pb-1">
-                <span className="text-xs text-gray-400 font-mono block">Zoom</span>
-                <span className="text-lg font-bold text-gray-700">{Math.round(scale * 100)}%</span>
-              </div>
+                  <div className="space-y-6">
+                     <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">제목</label>
+                        <input 
+                           type="text" 
+                           value={currentSlide.title || ''} 
+                           onChange={(e) => handleUpdateNoteTitle(e.target.value)}
+                           className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 outline-none text-lg font-medium"
+                           placeholder="예: 1. 로그인 프로세스"
+                        />
+                     </div>
+                     <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">상세 설명</label>
+                        <textarea 
+                           rows={6}
+                           value={currentSlide.description || ''} 
+                           onChange={(e) => handleUpdateNoteDescription(e.target.value)}
+                           className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 outline-none resize-none text-gray-600 leading-relaxed"
+                           placeholder="내용을 입력하세요."
+                        />
+                     </div>
+                  </div>
+               </div>
             </div>
-          </div>
-
-          <div className="flex-1 overflow-hidden relative bg-gray-200 w-full h-full">
-            <DesignCanvas
-              designElements={[]}
-              selectedElementId={null}
-              onSelectElement={() => {}}
-              onUpdateElement={() => {}}
-              annotations={currentSlide.annotations}
-              onUpdateAnnotationPosition={handleUpdateAnnotationPosition}
-              imageUrl={currentSlide.imageUrl}
-              scale={scale}
-              setScale={setScale}
-            />
-          </div>
+          )}
         </div>
 
-        {/* Right Panel */}
-        <div className="w-[500px] bg-white border-l border-gray-300 flex flex-col overflow-hidden shrink-0 z-20">
-          <AnnotationPanel
-            annotations={currentSlide.annotations}
-            onAddAnnotation={handleAddAnnotation}
-            onUpdateAnnotation={handleUpdateAnnotation}
-            onDeleteAnnotation={handleDeleteAnnotation}
-          />
-        </div>
+        {currentSlide.type === 'IMAGE' && (
+           <div className="w-[500px] bg-white border-l border-gray-300 flex flex-col overflow-hidden shrink-0 z-20">
+             <AnnotationPanel
+               annotations={currentSlide.annotations || []}
+               onAddAnnotation={handleAddAnnotation}
+               onUpdateAnnotation={handleUpdateAnnotation}
+               onDeleteAnnotation={handleDeleteAnnotation}
+             />
+           </div>
+        )}
       </div>
     </div>
   );
